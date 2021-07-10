@@ -52,28 +52,36 @@ let WebSocket = function (url) {
                     handle.callback();
                 }
             })
+        },
+
+        drain: async () => {
+            for (let handle of expressWs._callbacks) {
+                if (handle.path === url) {
+                    await handle.callback({
+                        ws: () => Promise.resolve(inst)
+                    });
+                }
+            };
         }
     };
-
-    expressWs._callbacks.forEach(handle => {
-        if (handle.path === url) {
-            handle.callback(inst);
-        }
-    });
 
     return inst;
 };
 
-let middleware = proxyquire('../../lib/dev-middleware', { 
+let _middlewareFn = proxyquire('../../lib/dev-middleware', { 
     './index': nollup,
     'chokidar': chokidar,
     'fs': fs,
-    'express-ws': (app) => {
-        app.ws = function (path, callback) {
-            expressWs._callbacks.push({ path, callback });
-        }
-    }
+    './tinyws': () => (_req, _res, next) => { next() }
 }); 
+
+function middleware(app, config, options) {
+    app.use = () => {};
+    app.ws = (path, callback) => {
+        expressWs._callbacks.push({ path, callback });
+    }
+    return _middlewareFn(app, config, options);
+}
 
 function createRequest (url) {
     return { url };
@@ -945,8 +953,8 @@ describe('Dev Middleware', () => {
         });
     });
 
-    it ('should send HMR greeting for new connections', function (done) {
-        this.timeout(5000);
+    it ('should send HMR greeting for new connections', async function () {
+        this.timeout(15000);
 
         fs.stub('./src/main.js', () => 'export default 123');
 
@@ -962,14 +970,14 @@ describe('Dev Middleware', () => {
             hot: true
         });
 
-        mwFetch(mw, '/bundle.js').then(res => {
-            let ws = new WebSocket('/__hmr');
-            expect(ws._received[0]).to.equal('{"greeting":true}');
-            done();
-        });
+        let _res = await mwFetch(mw, '/bundle.js');
+        
+        let ws = new WebSocket('/__hmr');
+        await ws.drain();
+        expect(ws._received[0]).to.equal('{"greeting":true}');
     });
 
-    it ('should send HMR statuses and changes', function (done) {
+    it ('should send HMR statuses and changes', async function() {
         this.timeout(5000);
 
         fs.stub('./src/main.js', () => 'export default 123');
@@ -986,25 +994,25 @@ describe('Dev Middleware', () => {
             hot: true
         });
 
-        mwFetch(mw, '/bundle.js').then(res => {
-            let ws = new WebSocket('/__hmr');
-            fs.stub('./src/main.js', () => 'export default 456');
-            chokidar.trigger('change', './src/main.js');
-            expect(ws._received.length).to.equal(2);
-            expect(ws._received[1]).to.equal('{"status":"check"}');
+        let _res = await mwFetch(mw, '/bundle.js');
+        
+        let ws = new WebSocket('/__hmr');
+        await ws.drain();
+        fs.stub('./src/main.js', () => 'export default 456');
+        chokidar.trigger('change', './src/main.js');
+        expect(ws._received.length).to.equal(2);
+        expect(ws._received[1]).to.equal('{"status":"check"}');
 
-            mwFetch(mw, '/bundle.js').then(res => {
-                expect(ws._received.length).to.equal(5);
-                expect(ws._received[2]).to.equal('{"status":"prepare"}');
-                expect(ws._received[3]).to.equal('{"status":"ready"}');
-                expect(ws._received[4].startsWith('{"changes":')).to.be.true;
-                expect(ws._received[4].indexOf('456') > 1).to.be.true;
-                done();
-            });
-        });
+        let _res2 = await mwFetch(mw, '/bundle.js');
+
+        expect(ws._received.length).to.equal(5);
+        expect(ws._received[2]).to.equal('{"status":"prepare"}');
+        expect(ws._received[3]).to.equal('{"status":"ready"}');
+        expect(ws._received[4].startsWith('{"changes":')).to.be.true;
+        expect(ws._received[4].indexOf('456') > 1).to.be.true;
     });
 
-    it ('should not send HMR updates to closed connections', function (done) {
+    it ('should not send HMR updates to closed connections', async function () {
         this.timeout(5000);
 
         fs.stub('./src/main.js', () => 'export default 123');
@@ -1021,21 +1029,18 @@ describe('Dev Middleware', () => {
             hot: true
         });
 
-        mwFetch(mw, '/bundle.js').then(res => {
-            let ws = new WebSocket('/__hmr');
-            fs.stub('./src/main.js', () => 'export default 456');
-            chokidar.trigger('change', './src/main.js');
-            expect(ws._received.length).to.equal(2);
+        let _res1 = await mwFetch(mw, '/bundle.js');
+        let ws = new WebSocket('/__hmr');
+        await ws.drain();
+        fs.stub('./src/main.js', () => 'export default 456');
+        chokidar.trigger('change', './src/main.js');
+        expect(ws._received.length).to.equal(2);
 
-            mwFetch(mw, '/bundle.js').then(res => {
-                expect(ws._received.length).to.equal(5);
-                ws.close();
-                mwFetch(mw, '/bundle.js').then(res => {
-                    expect(ws._received.length).to.equal(5);
-                    done();
-                });
-            });
-        });
+        let _res2 = await mwFetch(mw, '/bundle.js');
+        expect(ws._received.length).to.equal(5);
+        ws.close();
+        let _res3 = await mwFetch(mw, '/bundle.js');
+        expect(ws._received.length).to.equal(5);
     });    
 
     it ('should allow publicPath to be prefixed to all assets and chunks', async function () {
